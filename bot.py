@@ -95,7 +95,7 @@ def control_buttons(s, pages):
     if s["page"] < pages - 1:
         row.append(Button.inline("Next \u25b6",
                                  "pg:{sid}:{p}".format(sid=s["sid"], p=s["page"] + 1).encode()))
-    return [row] if row else [[]]
+    return [row] if row else None
 
 
 # ---------- rendering ----------

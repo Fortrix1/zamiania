@@ -1,5 +1,6 @@
 """xHamster search + direct-source extraction. Scrapes public pages."""
 import json
+import re
 from urllib.parse import quote
 
 import requests
@@ -100,6 +101,32 @@ def _initials(html):
     return {}
 
 
+def _walk(node, path, out):
+    """Collect every video-looking URL in a nested dict/list, with its path."""
+    if isinstance(node, dict):
+        if isinstance(node.get("url"), str):
+            out.append((path, node, node["url"]))
+        for k, v in node.items():
+            if k != "url":
+                _walk(v, path + [str(k)], out)
+    elif isinstance(node, list):
+        for item in node:
+            _walk(item, path, out)
+    elif isinstance(node, str) and (node.startswith("http") or
+                                    node.startswith("//")):
+        out.append((path, {}, node))
+
+
+def _quality(path, node, url):
+    cands = [str(node.get("quality") or ""), str(node.get("label") or "")]
+    cands += list(reversed(path)) + [url]
+    for c in cands:
+        m = re.search(r"(\d{3,4})p", c)
+        if m:
+            return m.group(1) + "p"
+    return "480p"
+
+
 def sources(page_url):
     """Return (mp4_variants, hls_url, seconds)."""
     resp = requests.get(page_url, headers=HEADERS, timeout=25)
@@ -110,22 +137,33 @@ def sources(page_url):
         bool(data.get("xplayerSettings"))))
     src = (data.get("xplayerSettings", {}) or {}).get("sources", {}) or {}
     print("[debug] source keys:", list(src.keys()))
+    print("[debug] sources dump:", json.dumps(src)[:1500])
 
-    variants = []
-    std = ((src.get("standard", {}) or {}).get("mp4", {})) or {}
-    for quality, info in std.items():
-        if isinstance(info, dict) and info.get("url"):
-            variants.append({"quality": quality, "url": info["url"],
-                             "size": info.get("size") or 0})
+    found = []
+    _walk(src, [], found)
 
-    hls = None
-    h = src.get("hls", {}) or {}
-    if isinstance(h, dict):
-        for k in ("hls", "standard"):
-            node = h.get(k)
-            if isinstance(node, dict) and node.get("url"):
-                hls = node["url"]
-                break
+    variants, hls_urls = [], []
+    for path, node, url in found:
+        if url.startswith("//"):
+            url = "https:" + url
+        url = url.replace("\\/", "/")
+        low = url.lower()
+        in_hls = "hls" in [p.lower() for p in path]
+        if ".m3u8" in low or in_hls:
+            hls_urls.append((path, url))
+        elif ".mp4" in low or "standard" in [p.lower() for p in path]:
+            variants.append({"quality": _quality(path, node, url),
+                             "url": url,
+                             "size": node.get("size") or 0,
+                             "av1": any("av1" in p.lower() for p in path)})
+
+    # Telegram plays H.264 best; only keep AV1 if nothing else exists
+    non_av1 = [v for v in variants if not v["av1"]]
+    variants = non_av1 or variants
+
+    non_av1_hls = [u for p, u in hls_urls
+                   if not any("av1" in s.lower() for s in p)]
+    hls = (non_av1_hls or [u for p, u in hls_urls] or [None])[0]
 
     seconds = (data.get("videoModel", {}) or {}).get("duration") or None
     return variants, hls, seconds
