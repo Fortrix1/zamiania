@@ -1,0 +1,41 @@
+name: bot
+on:
+  schedule:
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    defaults:
+      run:
+        working-directory: "corn bot"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt
+      - run: python bot.py
+        env:
+          API_ID:    ${{ secrets.API_ID }}
+          API_HASH:  ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      - name: Save file_id cache
+        if: always()
+        run: |
+          git config user.name  "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A data || true
+          git commit -m "cache $(date -u +%s)" || true
+          git push || true
