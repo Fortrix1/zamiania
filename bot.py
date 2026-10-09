@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import subprocess
+import traceback
 from collections import OrderedDict
 
 import requests
@@ -193,6 +194,7 @@ async def deliver(chat, r):
             except Exception:
                 pass
             print("[error] deliver failed for {0}".format(vid))
+            traceback.print_exc()
         finally:
             if os.path.exists(path):
                 try:

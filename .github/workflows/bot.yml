@@ -15,6 +15,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    defaults:
+      run:
+        working-directory: "corn bot"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,7 +26,7 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: pip install -r requirements.txt
-      - run: python bot.py
+      - run: python -u bot.py
         env:
           API_ID:    ${{ secrets.API_ID }}
           API_HASH:  ${{ secrets.API_HASH }}
