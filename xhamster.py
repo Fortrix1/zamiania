@@ -168,6 +168,29 @@ def sources(page_url):
                    if not any("av1" in s.lower() for s in p)]
     hls = (non_av1_hls or [u for p, u in hls_urls] or [None])[0]
 
+    # Fallback: scan the raw page for any .mp4 / .m3u8 links
+    if not variants and not hls:
+        raw = html.replace("\\/", "/").replace("\\u002F", "/")
+        links = re.findall(
+            r"https?://[^\"'\s<>\\]+?\.(?:m3u8|mp4)[^\"'\s<>\\]*", raw)
+        seen = set()
+        for u in links:
+            if u in seen:
+                continue
+            seen.add(u)
+            if ".m3u8" in u.lower():
+                if not hls:
+                    hls = u
+            else:
+                variants.append({"quality": _quality([], {}, u), "url": u,
+                                 "size": 0, "av1": False})
+        print("[debug] html fallback found {0} links".format(len(seen)))
+
+    LAST_DUMP = "data_keys={0} src={1} html_m3u8={2} html_mp4={3}".format(
+        list(data.keys())[:25], json.dumps(src)[:300],
+        html.count(".m3u8"), html.count(".mp4"))
+    print("[debug]", LAST_DUMP)
+
     seconds = (data.get("videoModel", {}) or {}).get("duration") or None
     return variants, hls, seconds
 

@@ -82,6 +82,23 @@ def download_hls(url, path):
         check=True, timeout=1500)
 
 
+def download_ytdlp(url, vid):
+    """Last resort: let yt-dlp (kept up to date for xHamster) fetch it."""
+    import glob
+    import yt_dlp
+    opts = {
+        "outtmpl": "/tmp/{0}.%(ext)s".format(vid),
+        "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
+        "quiet": True, "no_warnings": True, "retries": 3,
+        "http_headers": xh.HEADERS, "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+    files = [f for f in glob.glob("/tmp/{0}.*".format(vid))
+             if not f.endswith(".part")]
+    return files[0] if files else None
+
+
 def item_buttons(s, idx):
     data = "dl:{sid}:{idx}".format(sid=s["sid"], idx=idx)
     return [[Button.inline("\u2b07 Download", data.encode())]]
@@ -168,10 +185,14 @@ async def deliver(chat, r):
             elif hls:
                 await asyncio.to_thread(download_hls, hls, path)
             else:
-                await client.send_message(
-                    chat, "No downloadable source found.\n\nDEBUG: "
-                    + (xh.LAST_DUMP or "(empty)")[:1200])
-                return
+                print("[debug] trying yt-dlp fallback")
+                found = await asyncio.to_thread(download_ytdlp, r["url"], vid)
+                if not found:
+                    await client.send_message(
+                        chat, "No downloadable source found.\n\nDEBUG: "
+                        + (xh.LAST_DUMP or "(empty)")[:1200])
+                    return
+                path = found
             msg = await client.send_file(chat, path, caption=r["title"],
                                          supports_streaming=True)
             if msg.document:
@@ -190,9 +211,11 @@ async def deliver(chat, r):
                     chat, "Telegram asked for a pause. Try again in a minute.")
             except Exception:
                 pass
-        except Exception:
+        except Exception as e:
             try:
-                await client.send_message(chat, "Download failed, try again.")
+                await client.send_message(
+                    chat, "Download failed: {0}: {1}".format(
+                        type(e).__name__, str(e)[:300]))
             except Exception:
                 pass
             print("[error] deliver failed for {0}".format(vid))
