@@ -128,9 +128,21 @@ def _quality(path, node, url):
     return "480p"
 
 
+def _get(url):
+    """Fetch a page with a real-browser TLS fingerprint when possible."""
+    try:
+        from curl_cffi import requests as cr
+        return cr.get(url, impersonate="chrome", timeout=25,
+                      headers={"Accept-Language": "en-US,en;q=0.9",
+                               "Referer": BASE + "/"})
+    except Exception as e:
+        print("[debug] curl_cffi not used:", repr(e)[:150])
+        return requests.get(url, headers=HEADERS, timeout=25)
+
+
 def sources(page_url):
     """Return (mp4_variants, hls_url, seconds)."""
-    resp = requests.get(page_url, headers=HEADERS, timeout=25)
+    resp = _get(page_url)
     html = resp.text
     data = _initials(html)
     print("[debug] status={0} len={1} has_initials={2} has_player={3}".format(
@@ -186,8 +198,8 @@ def sources(page_url):
                                  "size": 0, "av1": False})
         print("[debug] html fallback found {0} links".format(len(seen)))
 
-    LAST_DUMP = "data_keys={0} src={1} html_m3u8={2} html_mp4={3}".format(
-        list(data.keys())[:25], json.dumps(src)[:300],
+    LAST_DUMP = "xps={0} src={1} html_m3u8={2} html_mp4={3}".format(
+        json.dumps(data.get("xplayerSettings"))[:250], json.dumps(src)[:300],
         html.count(".m3u8"), html.count(".mp4"))
     print("[debug]", LAST_DUMP)
 

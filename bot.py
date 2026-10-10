@@ -82,18 +82,40 @@ def download_hls(url, path):
         check=True, timeout=1500)
 
 
+def _ytdlp_url(url):
+    """yt-dlp needs /videos/<slug>-<id>; the site gives bare /videos/<id>."""
+    head, _, seg = url.rstrip("/").rpartition("/")
+    if "/videos/" in url and "-" not in seg:
+        return head + "/video-" + seg
+    return url
+
+
 def download_ytdlp(url, vid):
     """Last resort: let yt-dlp (kept up to date for xHamster) fetch it."""
     import glob
     import yt_dlp
+    url = _ytdlp_url(url)
     opts = {
         "outtmpl": "/tmp/{0}.%(ext)s".format(vid),
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
         "quiet": True, "no_warnings": True, "retries": 3,
-        "http_headers": xh.HEADERS, "noplaylist": True,
+        "noplaylist": True,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        opts["impersonate"] = ImpersonateTarget("chrome")
+    except Exception:
+        pass
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        if "mpersonat" in str(e) and "impersonate" in opts:
+            opts.pop("impersonate")
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        else:
+            raise
     files = [f for f in glob.glob("/tmp/{0}.*".format(vid))
              if not f.endswith(".part")]
     return files[0] if files else None
