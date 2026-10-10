@@ -6,6 +6,7 @@ from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 
+LAST_DUMP = ""
 BASE = "https://xhamster.com"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -137,7 +138,9 @@ def sources(page_url):
         bool(data.get("xplayerSettings"))))
     src = (data.get("xplayerSettings", {}) or {}).get("sources", {}) or {}
     print("[debug] source keys:", list(src.keys()))
-    print("[debug] sources dump:", json.dumps(src)[:1500])
+    global LAST_DUMP
+    LAST_DUMP = json.dumps(src)[:1500]
+    print("[debug] sources dump:", LAST_DUMP)
 
     found = []
     _walk(src, [], found)

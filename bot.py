@@ -168,7 +168,9 @@ async def deliver(chat, r):
             elif hls:
                 await asyncio.to_thread(download_hls, hls, path)
             else:
-                await client.send_message(chat, "No downloadable source found.")
+                await client.send_message(
+                    chat, "No downloadable source found.\n\nDEBUG: "
+                    + (xh.LAST_DUMP or "(empty)")[:1200])
                 return
             msg = await client.send_file(chat, path, caption=r["title"],
                                          supports_streaming=True)
