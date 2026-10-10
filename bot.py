@@ -294,7 +294,7 @@ async def on_cb(event):
         s["msg_ids"] = []
         s["state"] = "browsing"
         if not results:
-            await event.respond("No results.")
+            await event.respond("No results.\n\nDEBUG: " + xh.LAST_SEARCH)
             return
         await render(event, uid, first=True)
         return

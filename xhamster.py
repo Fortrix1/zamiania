@@ -7,6 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 
 LAST_DUMP = ""
+LAST_SEARCH = ""
 BASE = "https://xhamster.com"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -29,8 +30,14 @@ def search(query, sort="trending", limit=60):
     params = {}
     if sort in ("newest", "top-rated", "trending"):
         params["sort"] = sort
-    html = requests.get(url, params=params, headers=HEADERS, timeout=25).text
+    resp = _get(url, params)
+    html = resp.text
     soup = BeautifulSoup(html, "html.parser")
+    global LAST_SEARCH
+    title = (soup.title.string or "").strip()[:80] if soup.title else ""
+    LAST_SEARCH = "status={0} len={1} title={2!r} video_links={3}".format(
+        resp.status_code, len(html), title, html.count("/videos/"))
+    print("[debug] search", LAST_SEARCH)
 
     seen, out = set(), []
     for a in soup.find_all("a", href=True):
@@ -128,16 +135,16 @@ def _quality(path, node, url):
     return "480p"
 
 
-def _get(url):
+def _get(url, params=None):
     """Fetch a page with a real-browser TLS fingerprint when possible."""
     try:
         from curl_cffi import requests as cr
-        return cr.get(url, impersonate="chrome", timeout=25,
+        return cr.get(url, params=params, impersonate="chrome", timeout=25,
                       headers={"Accept-Language": "en-US,en;q=0.9",
                                "Referer": BASE + "/"})
     except Exception as e:
         print("[debug] curl_cffi not used:", repr(e)[:150])
-        return requests.get(url, headers=HEADERS, timeout=25)
+        return requests.get(url, params=params, headers=HEADERS, timeout=25)
 
 
 def sources(page_url):
