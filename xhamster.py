@@ -189,12 +189,13 @@ def sources(page_url):
 
     # Fallback: scan the raw page for any .mp4 / .m3u8 links
     if not variants and not hls:
-        raw = html.replace("\\/", "/").replace("\\u002F", "/")
+        raw = (html.replace("\\/", "/").replace("\\u002F", "/")
+                    .replace("\\u0026", "&").replace("\\u003D", "="))
         links = re.findall(
-            r"https?://[^\"'\s<>\\]+?\.(?:m3u8|mp4)[^\"'\s<>\\]*", raw)
+            r"https?://[^\x22\x27\s<>\\]+?\.(?:m3u8|mp4)[^\x22\x27\s<>\\]*", raw)
         seen = set()
         for u in links:
-            if u in seen:
+            if u in seen or " " in u:
                 continue
             seen.add(u)
             if ".m3u8" in u.lower():
@@ -215,16 +216,33 @@ def sources(page_url):
 
 
 def pick_under(variants, max_bytes, seconds=None):
+    """Best variant <= max_bytes.
+
+    Never trust an unknown size to 'fit' — a 1080p video with no size
+    metadata is often 1-2 GB and would blow the upload limit.
+    """
     def est(v):
-        if v["size"]:
-            return v["size"]
+        try:
+            size = int(v.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            return size
         if seconds:
             return BITRATE.get(v["quality"], 200_000) * seconds
         return 0
 
-    fits = [v for v in variants if est(v) <= max_bytes]
-    pool = fits or variants
-    for q in ORDER:
+    known = [v for v in variants if est(v) > 0]
+    fits = [v for v in known if est(v) <= max_bytes]
+    if fits:
+        pool, known_pool = fits, True
+    elif known:
+        pool, known_pool = [min(known, key=est)], True
+    else:
+        pool, known_pool = variants, False
+    # with zero size info, aim at 720p first instead of the biggest file
+    order = ORDER if known_pool else ["720p", "480p", "1080p", "360p", "240p"]
+    for q in order:
         for v in pool:
             if v["quality"] == q:
                 return v

@@ -23,7 +23,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 PER_PAGE = 10
 MAX_BYTES = 400 * 1024 * 1024
-RUN_HOURS = 5.8
+MIN_VALID_BYTES = 200 * 1024  # anything smaller is an error page, not a video
+RUN_HOURS = float(os.environ.get("RUN_HOURS", "5.8"))  # 0 = run forever
 CACHE_FILE = "data/fileids.json"
 MAX_SESSIONS = 500
 
@@ -66,9 +67,29 @@ def save_cache():
 
 # ---------- helpers ----------
 
+def is_probably_video(path):
+    """A real mp4/mkv starts with a magic header; an HTML error page doesn't."""
+    if not os.path.exists(path):
+        return False
+    if os.path.getsize(path) < MIN_VALID_BYTES:
+        return False
+    with open(path, "rb") as f:
+        head = f.read(12)
+    return (head[4:8] == b"ftyp"      # mp4/mov
+            or head[:4] == b"\x1a\x45\xdf\xa3"  # matroska/webm
+            or head[:1] == b"\x47")   # mpeg-ts
+
+
 def download(url, path):
-    with requests.get(url, headers=xh.HEADERS, stream=True, timeout=90) as r:
+    """Download a direct mp4 URL, failing fast on expired/ciphered URLs."""
+    with requests.get(url, headers=xh.HEADERS, stream=True,
+                      timeout=(10, 60)) as r:
         r.raise_for_status()
+        ctype = r.headers.get("Content-Type", "").lower()
+        if "text/html" in ctype or "json" in ctype:
+            raise RuntimeError(
+                "CDN returned {0} ({1}) — URL is likely ciphered/expired"
+                .format(r.status_code, ctype))
         with open(path, "wb") as f:
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
@@ -82,24 +103,17 @@ def download_hls(url, path):
         check=True, timeout=1500)
 
 
-def _ytdlp_url(url):
-    """yt-dlp needs /videos/<slug>-<id>; the site gives bare /videos/<id>."""
-    head, _, seg = url.rstrip("/").rpartition("/")
-    if "/videos/" in url and "-" not in seg:
-        return head + "/video-" + seg
-    return url
-
-
 def download_ytdlp(url, vid):
     """Last resort: let yt-dlp (kept up to date for xHamster) fetch it."""
     import glob
     import yt_dlp
-    url = _ytdlp_url(url)
     opts = {
         "outtmpl": "/tmp/{0}.%(ext)s".format(vid),
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best",
         "quiet": True, "no_warnings": True, "retries": 3,
-        "noplaylist": True,
+        "fragment_retries": 3, "noplaylist": True,
+        "socket_timeout": 30, "nocheckcertificate": True,
+        "logger": None, "progress_hooks": [],
     }
     try:
         from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -110,15 +124,16 @@ def download_ytdlp(url, vid):
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        if "mpersonat" in str(e) and "impersonate" in opts:
+        if "impersonat" in str(e).lower() and "impersonate" in opts:
             opts.pop("impersonate")
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
         else:
             raise
     files = [f for f in glob.glob("/tmp/{0}.*".format(vid))
-             if not f.endswith(".part")]
-    return files[0] if files else None
+             if not f.endswith(".part")
+             and os.path.getsize(f) > MIN_VALID_BYTES]
+    return sorted(files)[0] if files else None
 
 
 def item_buttons(s, idx):
@@ -183,9 +198,12 @@ async def render(event, uid, first=False):
 
 async def deliver(chat, r):
     vid = r["id"]
-    path = "/tmp/{0}.mp4".format(vid)
+    tmp = "/tmp/{0}.mp4".format(vid)
+    status = await client.send_message(chat, "Fetching...")
     async with DL_SEM:
+        path = None
         try:
+            # 1) cached Telegram file reference (fast re-send)
             cached = CACHE.get(vid)
             if cached:
                 try:
@@ -194,27 +212,48 @@ async def deliver(chat, r):
                         file_reference=base64.b64decode(cached["fr"]))
                     await client.send_file(chat, doc, caption=r["title"],
                                            supports_streaming=True)
+                    await status.delete()
                     return
                 except FileReferenceExpiredError:
                     CACHE.pop(vid, None)
                     save_cache()
 
+            # 2) direct mp4 URL from window.initials (fast path)
             variants, hls, secs = await asyncio.to_thread(xh.sources, r["url"])
             print("[debug] variants={0} hls={1}".format(len(variants), bool(hls)))
             pick = xh.pick_under(variants, MAX_BYTES, secs)
             if pick:
-                await asyncio.to_thread(download, pick["url"], path)
-            elif hls:
-                await asyncio.to_thread(download_hls, hls, path)
-            else:
+                try:
+                    await asyncio.to_thread(download, pick["url"], tmp)
+                    if is_probably_video(tmp):
+                        path = tmp
+                    else:
+                        raise RuntimeError("not a valid video file")
+                except Exception as e:
+                    print("[debug] direct download failed:", repr(e)[:200])
+
+            # 3) HLS master playlist via ffmpeg
+            if path is None and hls:
+                try:
+                    await asyncio.to_thread(download_hls, hls, tmp)
+                    if is_probably_video(tmp):
+                        path = tmp
+                except Exception as e:
+                    print("[debug] hls failed:", repr(e)[:200])
+
+            # 4) yt-dlp (kept current in CI — it is the maintained decipherer)
+            if path is None:
                 print("[debug] trying yt-dlp fallback")
                 found = await asyncio.to_thread(download_ytdlp, r["url"], vid)
-                if not found:
-                    await client.send_message(
-                        chat, "No downloadable source found.\n\nDEBUG: "
-                        + (xh.LAST_DUMP or "(empty)")[:1200])
-                    return
-                path = found
+                if found and is_probably_video(found):
+                    path = found
+
+            if path is None:
+                await status.edit(
+                    "No downloadable source found.\n\nDEBUG: "
+                    + (xh.LAST_DUMP or "(empty)")[:1200])
+                return
+
             msg = await client.send_file(chat, path, caption=r["title"],
                                          supports_streaming=True)
             if msg.document:
@@ -225,29 +264,38 @@ async def deliver(chat, r):
                         msg.document.file_reference).decode(),
                 }
                 save_cache()
+            try:
+                await status.delete()
+            except Exception:
+                pass
         except FloodWaitError as e:
             # Telegram told us to slow down — respect it
             await asyncio.sleep(e.seconds)
             try:
-                await client.send_message(
-                    chat, "Telegram asked for a pause. Try again in a minute.")
+                await status.edit(
+                    "Telegram asked for a pause. Try again in a minute.")
             except Exception:
                 pass
         except Exception as e:
             try:
-                await client.send_message(
-                    chat, "Download failed: {0}: {1}".format(
-                        type(e).__name__, str(e)[:300]))
+                await status.edit("Download failed: {0}: {1}".format(
+                    type(e).__name__, str(e)[:300]))
             except Exception:
-                pass
+                try:
+                    await client.send_message(
+                        chat, "Download failed: {0}: {1}".format(
+                            type(e).__name__, str(e)[:300]))
+                except Exception:
+                    pass
             print("[error] deliver failed for {0}".format(vid))
             traceback.print_exc()
         finally:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            for p in (tmp, "/tmp/{0}.mkv".format(vid), "/tmp/{0}.webm".format(vid)):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
 
 
 # ---------- handlers ----------
@@ -334,8 +382,11 @@ async def run():
     load_cache()
     await client.start(bot_token=BOT_TOKEN)
     print("Bot running.")
-    await asyncio.sleep(RUN_HOURS * 3600)
-    await client.disconnect()
+    if RUN_HOURS <= 0:
+        await client.run_until_disconnected()
+    else:
+        await asyncio.sleep(RUN_HOURS * 3600)
+        await client.disconnect()
 
 
 if __name__ == "__main__":

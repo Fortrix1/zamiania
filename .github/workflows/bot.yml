@@ -23,6 +23,11 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: pip install -r requirements.txt
+      - name: Update yt-dlp to nightly (xHamster breaks stable often)
+        run: |
+          pip install -U --force-reinstall \
+            "yt-dlp[default] @ https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz"
+          yt-dlp --version
       - run: python -u bot.py
         env:
           API_ID:    ${{ secrets.API_ID }}
