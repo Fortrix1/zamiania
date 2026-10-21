@@ -393,6 +393,7 @@ async def deliver(chat, r):
             if path is None:
                 await status.edit(
                     "No downloadable source found.\n\nDEBUG: "
+                    + (xh.LAST_PAGE or "") + "\n"
                     + (xh.LAST_DUMP or "(empty)")[:1200])
                 return
 

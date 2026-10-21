@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 
 LAST_DUMP = ""
 LAST_SEARCH = ""
+LAST_PAGE = ""
 BASE = "https://xhamster.com"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -52,16 +53,19 @@ def search(query, sort="trending", limit=60):
         img = a.find("img")
         if not img:
             continue
-        thumb = img.get("src") or img.get("data-src")
+        # src is usually a tiny blurred placeholder; data-src is the real thumb
+        thumb = img.get("data-src") or img.get("src")
         if not thumb or thumb.startswith("data:"):
             continue
         seen.add(vid)
         href = a["href"]
+        # the <a> title attribute holds the real title more often than img alt
+        title = (a.get("title") or img.get("alt") or "").strip() or vid
         out.append({
             "id": vid,
             "url": href if href.startswith("http") else BASE + href,
             "thumb": thumb,
-            "title": (img.get("alt") or vid).strip()[:120],
+            "title": title[:120],
         })
         if len(out) >= limit:
             break
@@ -157,23 +161,26 @@ def _get(url, params=None):
         return requests.get(url, params=params, headers=HEADERS, timeout=25)
 
 
-def sources(page_url):
-    """Return (mp4_variants, hls_url, seconds)."""
-    resp = _get(page_url)
-    html = resp.text
-    data = _initials(html)
-    print("[debug] status={0} len={1} has_initials={2} has_player={3}".format(
-        resp.status_code, len(html), "window.initials" in html,
-        bool(data.get("xplayerSettings"))))
-    src = (data.get("xplayerSettings", {}) or {}).get("sources", {}) or {}
-    print("[debug] source keys:", list(src.keys()))
-    global LAST_DUMP
-    LAST_DUMP = json.dumps(src)[:1500]
-    print("[debug] sources dump:", LAST_DUMP)
+def _record_page(resp, html):
+    """Remember what the fetched page actually was (for user-facing DEBUG)."""
+    global LAST_PAGE
+    soup = BeautifulSoup(html, "html.parser")
+    ptitle = (soup.title.string or "").strip()[:80] if soup.title else ""
+    low = html.lower()
+    LAST_PAGE = ("status={0} final_url={1} len={2} title={3!r} "
+                 "consent={4} challenge={5} initials={6}".format(
+                     getattr(resp, "status_code", "?"),
+                     getattr(resp, "url", "?"), len(html), ptitle,
+                     "consent" in low,
+                     ("captcha" in low or "cloudflare" in low
+                      or "just a moment" in low),
+                     "window.initials" in html))
 
+
+def _collect(src):
+    """Split walked url nodes into (mp4 variants, hls_url)."""
     found = []
     _walk(src, [], found)
-
     variants, hls_urls = [], []
     for path, node, url in found:
         if not _is_dl_url(url):
@@ -190,14 +197,59 @@ def sources(page_url):
                              "url": url,
                              "size": node.get("size") or 0,
                              "av1": any("av1" in p.lower() for p in path)})
-
     # Telegram plays H.264 best; only keep AV1 if nothing else exists
     non_av1 = [v for v in variants if not v["av1"]]
     variants = non_av1 or variants
-
     non_av1_hls = [u for p, u in hls_urls
                    if not any("av1" in s.lower() for s in p)]
     hls = (non_av1_hls or [u for p, u in hls_urls] or [None])[0]
+    return variants, hls
+
+
+def _embed_retry(page_url):
+    """Main page may be a consent wall; the embed page often still loads."""
+    global LAST_DUMP
+    m = (re.search(r"-(\d+)(?:[?#].*)?$", page_url)
+         or re.search(r"/embed/(\d+)", page_url)
+         or re.search(r"/(\d+)(?:[?#].*)?$", page_url))
+    if not m:
+        return [], None
+    embed = "{0}/embed/{1}".format(BASE, m.group(1))
+    try:
+        resp = _get(embed)
+        print("[debug] embed retry status={0} len={1}".format(
+            resp.status_code, len(resp.text)))
+        data = _initials(resp.text)
+        src = (data.get("xplayerSettings", {}) or {}).get("sources", {}) or {}
+        variants, hls = _collect(src)
+        if variants or hls:
+            LAST_DUMP = "embed_ok {0}".format(embed)
+        return variants, hls
+    except Exception as e:
+        print("[debug] embed retry failed:", repr(e)[:150])
+        return [], None
+
+
+def sources(page_url):
+    """Return (mp4_variants, hls_url, seconds)."""
+    global LAST_DUMP
+    resp = _get(page_url)
+    html = resp.text
+    _record_page(resp, html)
+    data = _initials(html)
+    print("[debug] status={0} len={1} has_initials={2} has_player={3}".format(
+        resp.status_code, len(html), "window.initials" in html,
+        bool(data.get("xplayerSettings"))))
+    src = (data.get("xplayerSettings", {}) or {}).get("sources", {}) or {}
+    print("[debug] source keys:", list(src.keys()))
+    LAST_DUMP = json.dumps(src)[:1500]
+    print("[debug] sources dump:", LAST_DUMP)
+
+    variants, hls = _collect(src)
+
+    # the video page can be a consent wall / geo block with no player data
+    if not variants and not hls:
+        variants, hls = _embed_retry(page_url)
 
     # Fallback: scan the raw page for any .mp4 / .m3u8 links
     if not variants and not hls:
@@ -218,7 +270,8 @@ def sources(page_url):
                                  "size": 0, "av1": False})
         print("[debug] html fallback found {0} links".format(len(seen)))
 
-    LAST_DUMP = "xps={0} src={1} html_m3u8={2} html_mp4={3}".format(
+    LAST_DUMP = "{0} | xps={1} src={2} html_m3u8={3} html_mp4={4}".format(
+        LAST_PAGE,
         json.dumps(data.get("xplayerSettings"))[:250], json.dumps(src)[:300],
         html.count(".m3u8"), html.count(".mp4"))
     print("[debug]", LAST_DUMP)
