@@ -13,7 +13,8 @@ from telethon import Button, TelegramClient, events
 from telethon.errors import (FloodWaitError, MessageIdInvalidError,
                              FileReferenceExpiredError)
 from telethon.sessions import MemorySession
-from telethon.tl.types import InputDocument, KeyboardButton, ReplyKeyboardMarkup
+from telethon.tl.types import (InputDocument, KeyboardButton,
+                             KeyboardButtonRow, ReplyKeyboardMarkup)
 import time
 
 import xhamster as xh
@@ -40,8 +41,8 @@ LAST_FLUSH = 0.0
 
 # persistent click-menu (no more typing /search all the time)
 MENU = ReplyKeyboardMarkup(
-    [[KeyboardButton("\U0001F50D Search")],
-     [KeyboardButton("\u2139\uFE0F Help")]],
+    rows=[KeyboardButtonRow(buttons=[KeyboardButton("\U0001F50D Search")]),
+          KeyboardButtonRow(buttons=[KeyboardButton("\u2139\uFE0F Help")])],
     resize=True)
 
 client = TelegramClient(MemorySession(), API_ID, API_HASH)
