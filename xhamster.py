@@ -109,10 +109,21 @@ def _initials(html):
     return {}
 
 
+def _is_dl_url(u):
+    """A genuinely fetchable URL.
+
+    xHamster now stores CIPHERED tokens (hex blobs) in url fields —
+    they must never reach requests/yt-dlp.
+    """
+    return (isinstance(u, str)
+            and (u.startswith("http://") or u.startswith("https://")
+                 or u.startswith("//")))
+
+
 def _walk(node, path, out):
     """Collect every video-looking URL in a nested dict/list, with its path."""
     if isinstance(node, dict):
-        if isinstance(node.get("url"), str):
+        if _is_dl_url(node.get("url")):
             out.append((path, node, node["url"]))
         for k, v in node.items():
             if k != "url":
@@ -120,8 +131,7 @@ def _walk(node, path, out):
     elif isinstance(node, list):
         for item in node:
             _walk(item, path, out)
-    elif isinstance(node, str) and (node.startswith("http") or
-                                    node.startswith("//")):
+    elif _is_dl_url(node):
         out.append((path, {}, node))
 
 
@@ -166,6 +176,8 @@ def sources(page_url):
 
     variants, hls_urls = [], []
     for path, node, url in found:
+        if not _is_dl_url(url):
+            continue
         if url.startswith("//"):
             url = "https:" + url
         url = url.replace("\\/", "/")

@@ -41,3 +41,25 @@ download pipeline underneath it:
   all-unknown -> 720p-first ordering.
 - `xhamster.py`: `\u0026`/`\u003D` unescaping, quote-safe regex.
 - `bot.yml`: nightly yt-dlp reinstall step.
+
+## Round 2 (2026-10-21): MissingSchema — Invalid URL '073b79c7d...'
+
+That hex blob is xHamster's new CIPHERED video URL (same obfuscation as
+yt-dlp issue #15239). Root hole: `xhamster._walk()` collected ANY string
+found in a JSON `url` field with no scheme check, so ciphered tokens
+became "variants" and were fed straight to `requests`.
+
+Fixes:
+- `_walk()` now only collects strings starting with http://, https:// or //
+  (new `_is_dl_url()` helper), with the same filter inside `sources()`.
+- `download()` raises a clear error if the URL has no scheme.
+- `deliver()`: the `xh.sources()` call and the yt-dlp stage are each
+  wrapped in their own try — a failure in one stage now falls through to
+  the next instead of crashing to the user-facing handler.
+- Cached `InputDocument` re-send failures other than
+  FileReferenceExpiredError now drop the cache entry and continue.
+
+With ciphered URLs everywhere, the pipeline intentionally degrades to the
+yt-dlp stage — that is the only maintained decipherer. If yt-dlp nightly
+also fails, the bot now reports a clean "No downloadable source found" with
+the DEBUG dump instead of a raw MissingSchema traceback.

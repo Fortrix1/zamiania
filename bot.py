@@ -82,6 +82,9 @@ def is_probably_video(path):
 
 def download(url, path):
     """Download a direct mp4 URL, failing fast on expired/ciphered URLs."""
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("not a real URL (probably a ciphered token): {0!r}"
+                         .format(url[:80]))
     with requests.get(url, headers=xh.HEADERS, stream=True,
                       timeout=(10, 60)) as r:
         r.raise_for_status()
@@ -217,9 +220,18 @@ async def deliver(chat, r):
                 except FileReferenceExpiredError:
                     CACHE.pop(vid, None)
                     save_cache()
+                except Exception as e:
+                    print("[debug] cached send failed:", repr(e)[:150])
+                    CACHE.pop(vid, None)
+                    save_cache()
 
             # 2) direct mp4 URL from window.initials (fast path)
-            variants, hls, secs = await asyncio.to_thread(xh.sources, r["url"])
+            try:
+                variants, hls, secs = await asyncio.to_thread(
+                    xh.sources, r["url"])
+            except Exception as e:
+                print("[debug] sources failed:", repr(e)[:200])
+                variants, hls, secs = [], None, None
             print("[debug] variants={0} hls={1}".format(len(variants), bool(hls)))
             pick = xh.pick_under(variants, MAX_BYTES, secs)
             if pick:
@@ -244,9 +256,13 @@ async def deliver(chat, r):
             # 4) yt-dlp (kept current in CI — it is the maintained decipherer)
             if path is None:
                 print("[debug] trying yt-dlp fallback")
-                found = await asyncio.to_thread(download_ytdlp, r["url"], vid)
-                if found and is_probably_video(found):
-                    path = found
+                try:
+                    found = await asyncio.to_thread(
+                        download_ytdlp, r["url"], vid)
+                    if found and is_probably_video(found):
+                        path = found
+                except Exception as e:
+                    print("[debug] yt-dlp failed:", repr(e)[:300])
 
             if path is None:
                 await status.edit(
