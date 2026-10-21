@@ -33,6 +33,8 @@ jobs:
           API_ID:    ${{ secrets.API_ID }}
           API_HASH:  ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          # your Telegram user id (from @userinfobot) — unlocks /admin panel
+          ADMIN_ID:  ${{ secrets.ADMIN_ID }}
       - name: Save file_id cache
         if: always()
         run: |

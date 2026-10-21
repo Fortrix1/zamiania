@@ -13,7 +13,8 @@ from telethon import Button, TelegramClient, events
 from telethon.errors import (FloodWaitError, MessageIdInvalidError,
                              FileReferenceExpiredError)
 from telethon.sessions import MemorySession
-from telethon.tl.types import InputDocument
+from telethon.tl.types import InputDocument, KeyboardButton, ReplyKeyboardMarkup
+import time
 
 import xhamster as xh
 
@@ -26,11 +27,22 @@ MAX_BYTES = 400 * 1024 * 1024
 MIN_VALID_BYTES = 200 * 1024  # anything smaller is an error page, not a video
 RUN_HOURS = float(os.environ.get("RUN_HOURS", "5.8"))  # 0 = run forever
 CACHE_FILE = "data/fileids.json"
+STATS_FILE = "data/stats.json"
 MAX_SESSIONS = 500
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # your Telegram user id
 
 SESSIONS = OrderedDict()
 DL_SEM = asyncio.Semaphore(2)
 CACHE = {}
+STATS = {"users": {}, "queries": []}   # users: {uid: {...}}, queries: capped list
+STATS_DIRTY = False
+LAST_FLUSH = 0.0
+
+# persistent click-menu (no more typing /search all the time)
+MENU = ReplyKeyboardMarkup(
+    [[KeyboardButton("\U0001F50D Search")],
+     [KeyboardButton("\u2139\uFE0F Help")]],
+    resize=True)
 
 client = TelegramClient(MemorySession(), API_ID, API_HASH)
 
@@ -63,6 +75,119 @@ def save_cache():
     os.makedirs("data", exist_ok=True)
     with open(CACHE_FILE, "w") as f:
         json.dump(CACHE, f)
+
+
+# ---------- stats & query logging ----------
+
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE) as f:
+                data = json.load(f)
+            STATS["users"].update(data.get("users", {}))
+            STATS["queries"].extend(data.get("queries", []))
+        except Exception as e:
+            print("[debug] stats load failed:", repr(e)[:150])
+
+
+def flush_stats(force=False):
+    global STATS_DIRTY, LAST_FLUSH
+    now = time.time()
+    if not STATS_DIRTY and not force:
+        return
+    if not force and now - LAST_FLUSH < 30:
+        return
+    os.makedirs("data", exist_ok=True)
+    tmp = STATS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(STATS, f)
+    os.replace(tmp, STATS_FILE)
+    STATS_DIRTY = False
+    LAST_FLUSH = now
+
+
+async def track(event):
+    """Record/refresh a user in stats (fire-and-forget)."""
+    global STATS_DIRTY
+    try:
+        uid = str(event.sender_id)
+        u = STATS["users"].setdefault(uid, {"name": "", "uses": 0,
+                                            "first": 0, "last": 0})
+        snd = await event.get_sender()
+        if getattr(snd, "username", None):
+            u["name"] = "@" + snd.username
+        elif getattr(snd, "first_name", None):
+            u["name"] = snd.first_name
+        now = time.time()
+        u["uses"] += 1
+        if not u["first"]:
+            u["first"] = now
+        u["last"] = now
+        STATS_DIRTY = True
+    except Exception:
+        pass
+
+
+def log_query(query, sort, uid):
+    global STATS_DIRTY
+    STATS["queries"].append({
+        "q": query[:120], "sort": sort, "uid": str(uid),
+        "name": (STATS["users"].get(str(uid), {}) or {}).get("name", ""),
+        "ts": time.time(),
+    })
+    if len(STATS["queries"]) > 500:
+        del STATS["queries"][:-500]
+    STATS_DIRTY = True
+
+
+def _fmt_ts(ts):
+    return time.strftime("%d/%m %H:%M", time.gmtime(ts))
+
+
+def build_stats_text():
+    users = STATS["users"]
+    now = time.time()
+    day = 86400
+    total = len(users)
+    today = sum(1 for u in users.values() if now - u["last"] < day)
+    week = sum(1 for u in users.values() if now - u["last"] < 7 * day)
+    return ("\U0001F465 Total users: {0}\n"
+            "\u2705 Active today: {1}\n"
+            "\U0001F4C5 Active this week: {2}\n"
+            "\U0001F50E Total searches logged: {3}").format(
+        total, today, week, len(STATS["queries"]))
+
+
+def build_queries_text(limit=15):
+    if not STATS["queries"]:
+        return "No searches logged yet."
+    lines = []
+    for r in STATS["queries"][-limit:][::-1]:
+        lines.append("{0}  {1}: {2} [{3}]".format(
+            _fmt_ts(r["ts"]), r.get("name") or r["uid"], r["q"], r["sort"]))
+    return "\U0001F50D Recent searches:\n\n" + "\n".join(lines)
+
+
+def build_top_text(limit=10):
+    from collections import Counter
+    c = Counter(q["q"].strip().lower() for q in STATS["queries"] if q["q"].strip())
+    if not c:
+        return "No searches logged yet."
+    lines = ["{0}. {1} — {2}x".format(i + 1, q, n)
+             for i, (q, n) in enumerate(c.most_common(limit))]
+    return "\U0001F3C6 Top queries:\n\n" + "\n".join(lines)
+
+
+def build_users_text(limit=20):
+    users = STATS["users"]
+    if not users:
+        return "No users yet."
+    rows = sorted(users.items(), key=lambda kv: kv[1]["last"], reverse=True)
+    lines = ["{0}  {1}  ({2}x, last {3})".format(
+        u["name"] or uid, uid, u["uses"], _fmt_ts(u["last"]))
+        for uid, u in rows[:limit]]
+    return "\U0001F465 Last {0} users (of {1}):\n\n{2}".format(
+        min(limit, len(rows)), len(rows), "\n".join(lines))
 
 
 # ---------- helpers ----------
@@ -314,21 +439,52 @@ async def deliver(chat, r):
                         pass
 
 
+# ---------- admin ----------
+
+def admin_buttons():
+    return [[Button.inline("\U0001F4CA Stats", b"adm:stats"),
+             Button.inline("\U0001F50D Recent", b"adm:queries")],
+            [Button.inline("\U0001F3C6 Top", b"adm:top"),
+             Button.inline("\U0001F465 Users", b"adm:users")]]
+
+
+@client.on(events.NewMessage(pattern=r"/(admin|panel|query|queries|stats)"))
+async def on_admin(event):
+    if not ADMIN_ID or event.sender_id != ADMIN_ID:
+        return
+    await track(event)
+    await event.respond("\U0001F6E1 Admin panel:", buttons=admin_buttons())
+
+
 # ---------- handlers ----------
 
 @client.on(events.NewMessage(pattern=r"/(start|search)"))
 async def on_start(event):
+    await track(event)
     set_session(event.sender_id, {"state": "await_kw"})
-    await event.respond("Type your keywords or tags:")
+    await event.respond("Type your keywords or tags:", buttons=MENU)
 
 
 @client.on(events.NewMessage(
     func=lambda e: e.is_private and (e.text or "") and not e.text.startswith("/")))
 async def on_text(event):
+    await track(event)
+    text = (event.text or "").strip()
+    # persistent click-menu entries work from any state
+    if text == "\U0001F50D Search" or text.lower() in ("/search", "/start"):
+        set_session(event.sender_id, {"state": "await_kw"})
+        await event.respond("Type your keywords or tags:", buttons=MENU)
+        return
+    if text == "\u2139\uFE0F Help":
+        await event.respond(
+            "Tap \U0001F50D Search, type keywords, pick a sort order, "
+            "then hit \u2b07 Download on any result. Use /search anytime.",
+            buttons=MENU)
+        return
     s = get_session(event.sender_id)
     if not s or s.get("state") != "await_kw":
         return
-    s["query"] = event.text.strip()
+    s["query"] = text
     s["state"] = "await_sort"
     await event.respond("Sort by?", buttons=[[
         Button.inline("Trending", b"sort:trending"),
@@ -343,6 +499,28 @@ async def on_cb(event):
     parts = event.data.decode().split(":")
     kind = parts[0]
 
+    if kind == "adm":
+        if event.sender_id != ADMIN_ID or not ADMIN_ID:
+            await event.answer("Not authorized.", alert=True)
+            return
+        if len(parts) != 2:
+            return
+        which = parts[1]
+        if which == "stats":
+            text = build_stats_text()
+        elif which == "queries":
+            text = build_queries_text()
+        elif which == "top":
+            text = build_top_text()
+        elif which == "users":
+            text = build_users_text()
+        else:
+            await event.answer()
+            return
+        await event.answer()
+        await event.edit(text, buttons=admin_buttons())
+        return
+
     if kind == "sort":
         if len(parts) != 2:
             return
@@ -351,6 +529,9 @@ async def on_cb(event):
             await event.answer("Type /search first.", alert=True)
             return
         await event.answer("Searching...")
+        await track(event)
+        log_query(s["query"], parts[1], uid)
+        flush_stats(force=True)
         results = await asyncio.to_thread(xh.search, s["query"], parts[1], 60)
         s["sid"] = secrets.token_hex(3)      # ticket for this search
         s["results"] = results
@@ -394,15 +575,26 @@ async def on_cb(event):
 
 # ---------- main ----------
 
+async def _stats_flusher():
+    while True:
+        await asyncio.sleep(30)
+        flush_stats()
+
+
 async def run():
     load_cache()
+    load_stats()
     await client.start(bot_token=BOT_TOKEN)
     print("Bot running.")
+    flusher = asyncio.create_task(_stats_flusher())
     if RUN_HOURS <= 0:
         await client.run_until_disconnected()
     else:
         await asyncio.sleep(RUN_HOURS * 3600)
         await client.disconnect()
+    flusher.cancel()
+    flush_stats(force=True)
+    save_cache()
 
 
 if __name__ == "__main__":

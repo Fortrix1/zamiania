@@ -63,3 +63,26 @@ With ciphered URLs everywhere, the pipeline intentionally degrades to the
 yt-dlp stage — that is the only maintained decipherer. If yt-dlp nightly
 also fails, the bot now reports a clean "No downloadable source found" with
 the DEBUG dump instead of a raw MissingSchema traceback.
+
+## Round 3 (2026-10-21): admin panel, stats, query log + click menu
+
+New features (all in `bot.py`, state persists in `data/stats.json`,
+pushed by the existing cache step in `bot.yml`):
+
+- **Click menu**: `/start` now shows a persistent ReplyKeyboard
+  (\U0001F50D Search / \u2139\uFE0F Help). "Search" works from any state;
+  no need to type /search every time. `/search` and `/start` still work.
+- **Stats tracking**: every interaction records the user
+  (name, use count, first/last seen) into `STATS["users"]`.
+- **Query log**: every search records query + sort + user + timestamp
+  (last 500 kept) into `STATS["queries"]`.
+- **Admin panel**: set the `ADMIN_ID` repo secret to your Telegram user
+  id (get it from @userinfobot). Then `/admin`, `/panel`, `/stats`,
+  `/query` or `/queries` opens an inline panel with four views:
+  \U0001F4CA user stats (total / active today / active week / searches)
+  \U0001F50D recent searches (who searched what, when)
+  \U0001F3C6 top queries
+  \U0001F465 last 20 active users
+  Only `ADMIN_ID` can open it; everyone else is silently ignored.
+- Stats flush every 30s in the background and force-flush on shutdown,
+  so the scheduled runner's git-push step persists them.
